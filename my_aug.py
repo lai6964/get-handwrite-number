@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import imgaug.augmenters as iaa
 import matplotlib.pyplot as plt
+from multiprocessing import cpu_count  # 查看cpu核心数
+from multiprocessing import Pool  # 并行处理必备，进程池
 
 
 def my_aug_top(img):
@@ -23,7 +25,6 @@ def my_aug_top(img):
     imgs = np.expand_dims(img, 0)
     imgs = seq.augment_images(imgs)
     return imgs[0]
-
 
 def my_aug_back(img):
     seq = iaa.Sequential([
@@ -44,6 +45,27 @@ def my_aug_back(img):
     imgs = seq.augment_images(imgs)
     return imgs[0]
 
+def my_aug_last(img, bboxes):
+    seq = iaa.Sequential([
+        # iaa.SomeOf((0, 2), [iaa.OneOf([iaa.MotionBlur(k=(3, 3)),
+        #                                iaa.GaussianBlur((0, 3)),
+        #                                iaa.AverageBlur(k=(3, 3)),
+        #                                iaa.MedianBlur(k=(3, 3)),
+        #                                ]),
+        #                     iaa.OneOf([iaa.AddElementwise((-10, 10), per_channel=0.5),
+        #                                iaa.AdditiveGaussianNoise(loc=0, scale=0.01 * 255, per_channel=0.5),
+        #                                iaa.AdditiveLaplaceNoise(scale=0.01 * 255, per_channel=0.5),
+        #                                iaa.AdditivePoissonNoise(10, per_channel=0.5),
+        #                                ]),
+        #                     # iaa.TranslateX(percent=(-0.1, 0.1)),
+        #                     # iaa.TranslateY(percent=(-0.1, 0.1)),
+        #                     ], random_order=True),
+        iaa.AddToBrightness(add=(-50, 50), from_colorspace='BGR'),
+    ], random_order=True)
+
+    imgs = np.expand_dims(img, 0)
+    imgs, bboxes = seq.augment_images(imgs,bboxes)
+    return imgs[0], bboxes
 
 def cal_iou(bbox1, bbox2):
     cx1, cy1, cx2, cy2 = bbox1
@@ -67,6 +89,9 @@ def merge(scale_fit, imgt, imgb, bboxes, tryTimes=10):
     bboxes = np.array(bboxes)
     ht, wt, _ = imgt.shape  # top
     hb, wb, _ = imgb.shape  # bottom
+
+    while(wb<wt * scale_fit):
+        scale_fit=0.9*scale_fit
 
     wtr = int(wt * scale_fit)
     htr = int(ht * scale_fit)
@@ -103,28 +128,67 @@ def merge(scale_fit, imgt, imgb, bboxes, tryTimes=10):
             return imgb, bboxes
 
 
-if __name__ == "__main__":
-    imgt_dir = "data"
-    imgb_dir = "back"
-    imgt_list = os.listdir(imgt_dir)
-    imgb_list = os.listdir(imgb_dir)
-
-    index = random.randint(5, 20)
+def single_work(count, imgb_list, imgt_list, imgb_dir, imgt_dir):
+    index = random.randint(5, 20)  # targets' num in each picture
     bboxes = []
-    scale_fit = random.uniform(0.4, 2.0)
+    symbols = []
+    scale_fit = random.uniform(0.4, 2.0)  ## target size in one pic should be similar
     imgb_index = random.randint(0, len(imgb_list) - 1)
     imgb = cv2.imread(os.path.join(imgb_dir, imgb_list[imgb_index]))
     imgb = my_aug_back(imgb)
-    imgb = cv2.resize(imgb, (960, 960))
+    imgb = cv2.resize(imgb, (960, 960))  ########## output image-size should be different
+    #### emmm,说实话，用imgaug做数据扩充不加box，有点儿不习惯
     for i in range(index):
         imgt_index = random.randint(0, len(imgt_list) - 1)
         imgt = cv2.imread(os.path.join(imgt_dir, imgt_list[imgt_index]))
         imgt = my_aug_top(imgt)
         imgb, bboxes = merge(scale_fit=scale_fit, imgt=imgt, imgb=imgb, bboxes=bboxes)
 
+        # imgt_name = 'label/' + imgt_list[imgt_index][:-4] + '.txt'
+        # with open(imgt_name, 'r') as file:
+        #     line = file.readline()
+        #     symbol = line.split('\t')[-1]
+        #     symbols.append(symbol.rstrip('\n'))
+        symbols.append("label")
+    ### perhaps, should add some bright changes to the last output
+    ### eg. def my_aug_output(img): return img 0
+    cv2.imwrite("train_1000/data/" + str(count) + ".png", imgb)
+    with open("train_1000/label/" + str(count) + ".txt", 'w') as file:
+        for i in range(len(bboxes)):
+            ##### for 4 point: x1,y1,x2,y2
+            for point in bboxes[i]:
+                file.write(str(point) + ',')
+            file.write(symbols[i])
+            file.write('\n')
+    return imgb, bboxes
+
+
+if __name__ == "__main__":
+    imgt_dir = "mydata/logo"
+    imgb_dir = "mydata/background"
+    imgt_list = os.listdir(imgt_dir)
+    imgb_list = os.listdir(imgb_dir)
+
+    save_path = "train_1000"
+    if not os.path.exists(save_path):
+        os.mkdir(save_path)
+        os.mkdir("train_1000/data")
+        os.mkdir("train_1000/label")
+
+    num_cores = 8#cpu_count()  # cpu核心数
+    p = Pool(num_cores)
+    result = []
+    for i in range(10000):  # 生成的数据量
+        result.append(p.apply_async(func=single_work, args=(i, imgb_list, imgt_list, imgb_dir, imgt_dir,)).get())
+    p.close()
+    p.join()
+    # for i in range(10000):
+    #     imgb, bboxes = single_work(i, imgb_list, imgt_list, imgb_dir, imgt_dir)
+
+    imgb, bboxes = result[0]
     for box in bboxes:
         [x1, y1, x2, y2] = box
         cv2.rectangle(imgb, (x1, y1), (x2, y2), (255, 0, 0), thickness=2)
-    cv2.imshow('pic', imgb)
-    print(bboxes)
-    cv2.waitKey(0)
+    # cv2.imshow('pic', imgb)
+    # print(bboxes)
+    # cv2.waitKey(0)
